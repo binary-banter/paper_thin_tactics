@@ -1,13 +1,13 @@
-use std::fmt::{Display, Formatter};
+use std::ops::{Index, IndexMut, Neg};
 
-#[derive(Copy, Clone, Default)]
+mod display;
+
+#[derive(Default, Copy, Clone)]
 enum Cell {
     #[default]
     Empty,
-    Blue,
-    Red,
-    BlueWall,
-    RedWall,
+    Unit(Player),
+    Wall(Player),
 }
 
 const BOARD_WIDTH: usize = 10;
@@ -16,7 +16,7 @@ const BOARD_HEIGHT: usize = 10;
 type Board = [[Cell; BOARD_WIDTH]; BOARD_HEIGHT];
 type Mask = [[bool; BOARD_WIDTH]; BOARD_HEIGHT];
 
-#[derive(Default)]
+#[derive(Default, Copy, Clone, Eq, PartialEq)]
 enum Player {
     #[default]
     Blue,
@@ -26,9 +26,7 @@ enum Player {
 struct Game {
     board: Board,
     player: Player,
-    turns: usize,
-    legal_blue: Mask,
-    legal_red: Mask,
+    turns_left: usize,
 }
 
 impl Default for Game {
@@ -37,109 +35,174 @@ impl Default for Game {
 
         let mut board = Board::default();
 
-        board[0][0] = Cell::Blue;
-        board[BOARD_HEIGHT - 1][BOARD_WIDTH - 1] = Cell::Red;
-
-        let mut legal_blue = Mask::default();
-
-        legal_blue[0][1] = true;
-        legal_blue[1][0] = true;
-        legal_blue[1][1] = true;
-
-        let mut legal_red = Mask::default();
-
-        legal_red[BOARD_HEIGHT - 2][BOARD_WIDTH - 2] = true;
-        legal_red[BOARD_HEIGHT - 2][BOARD_WIDTH - 1] = true;
-        legal_red[BOARD_HEIGHT - 1][BOARD_WIDTH - 2] = true;
+        board[0][0] = Cell::Unit(Player::Blue);
+        board[BOARD_HEIGHT - 1][BOARD_WIDTH - 1] = Cell::Unit(Player::Red);
 
         Self {
             board,
             player: Player::default(),
-            turns: TURNS_DEFAULT,
-            legal_blue,
-            legal_red,
+            turns_left: TURNS_DEFAULT,
         }
     }
 }
 
-impl Display for Game {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        writeln!(
-            f,
-            "It is the {} player's turn. {} turns are left.",
-            self.player, self.turns
-        )?;
-        for row in self.board {
-            for cell in row {
-                write!(f, "{cell}")?;
-            }
-            writeln!(f)?;
-        }
-        Ok(())
+#[derive(Copy, Clone)]
+struct BoardPos(usize, usize);
+
+impl Index<BoardPos> for Board {
+    type Output = Cell;
+
+    fn index(&self, index: BoardPos) -> &Self::Output {
+        &self[index.0][index.1]
     }
 }
 
-const RESET: &str = "\x1B[0m";
-const CYAN_FG: &str = "\x1B[36m";
-const RED_FG: &str = "\x1B[31m";
-const BOLD: &str = "\x1B[1m";
+impl IndexMut<BoardPos> for Board {
+    fn index_mut(&mut self, index: BoardPos) -> &mut Self::Output {
+        &mut self[index.0][index.1]
+    }
+}
 
-impl Display for Player {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+impl Neg for Player {
+    type Output = Player;
+
+    fn neg(self) -> Self::Output {
         match self {
-            Player::Blue => write!(f, "{BOLD}{CYAN_FG}Blue{RESET}"),
-            Player::Red => write!(f, "{BOLD}{RED_FG}Red{RESET}"),
-        }
-    }
-}
-
-impl Display for Cell {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Cell::Empty => write!(f, "{BOLD}."),
-            Cell::Blue => write!(f, "{BOLD}{CYAN_FG}b{RESET}"),
-            Cell::Red => write!(f, "{BOLD}{RED_FG}r{RESET}"),
-            Cell::BlueWall => write!(f, "{BOLD}{CYAN_FG}B{RESET}"),
-            Cell::RedWall => write!(f, "{BOLD}{RED_FG}R{RESET}"),
+            Player::Blue => Player::Red,
+            Player::Red => Player::Blue,
         }
     }
 }
 
 impl Game {
-    /// Place a cell. Returns whether the placement was legal.
-    fn place(&mut self, y: usize, x: usize) -> bool {
-        let legal = match self.player {
-            Player::Blue => self.legal_blue,
-            Player::Red => self.legal_red,
-        };
+    /// Returns collection of legal moves for current player.
+    fn legal_moves(&self) -> Vec<BoardPos> {
+        let mut processed = Mask::default();
+        let mut moves = Vec::new();
+        let mut stack = Vec::new();
 
-        if legal[y][x] {
-            self.board[y][x] = match self.board[y][x] {
-                Cell::Empty => match self.player {
-                    Player::Blue => Cell::Red,
-                    Player::Red => Cell::Blue,
-                },
-                Cell::Blue => Cell::RedWall,
-                Cell::Red => Cell::BlueWall,
-                Cell::BlueWall | Cell::RedWall => unreachable!(),
-            };
+        // Put all of our own units on the stack
+        for i in 0..BOARD_HEIGHT {
+            for j in 0..BOARD_WIDTH {
+                match self.board[i][j] {
+                    Cell::Unit(p) if p == self.player => {
+                        stack.push(BoardPos(i, j));
+                        processed[i][j] = true;
+                    }
+                    _ => {}
+                }
+            }
+        }
 
-            self.update_legal(y, x);
+        // Process tiles that are owned by us
+        while let Some(BoardPos(i, j)) = stack.pop() {
+            for (di, dj) in [
+                (i.wrapping_sub(1), j.wrapping_sub(1)),
+                (i.wrapping_sub(1), j),
+                (i.wrapping_sub(1), j + 1),
+                (i, j.wrapping_sub(1)),
+                (i, j + 1),
+                (i + 1, j.wrapping_sub(1)),
+                (i + 1, j),
+                (i + 1, j + 1),
+            ] {
+                if di >= BOARD_WIDTH || dj >= BOARD_HEIGHT {
+                    continue;
+                }
+                if processed[di][dj] {
+                    continue;
+                }
+                processed[di][dj] = true;
 
-            true
+                match self.board[di][dj] {
+                    Cell::Empty => moves.push(BoardPos(di, dj)),
+                    Cell::Unit(p) => {
+                        if p != self.player {
+                            moves.push(BoardPos(di, dj));
+                        }
+                    }
+                    Cell::Wall(p) => {
+                        if p == self.player {
+                            stack.push(BoardPos(di, dj));
+                        }
+                    }
+                }
+            }
+        }
+
+        moves
+    }
+
+    /// Recursively calculates the optimal move for the current player, until level reaches 0.
+    /// Returns the board position that needs to be played in the current recursion and its evaluation.
+    fn recurse(&mut self, level: usize) -> (BoardPos, isize) {
+        let legal_moves = self.legal_moves();
+
+        if level == 0 {
+            self.player = -self.player;
+            let opponent_legal_moves = self.legal_moves();
+            self.player = -self.player;
+            return (
+                BoardPos(usize::MAX, usize::MAX),
+                legal_moves.len() as isize - opponent_legal_moves.len() as isize,
+            );
+        }
+
+        legal_moves
+            .into_iter()
+            .map(|mv| {
+                self.do_move(mv);
+                let (_, mut eval) = self.recurse(level - 1);
+                self.undo_move(mv);
+
+                if self.turns_left == 1 {
+                    eval *= -1;
+                }
+
+                (mv, eval)
+            })
+            .max_by_key(|&(_, eval)| eval)
+            .unwrap_or((BoardPos(usize::MAX, usize::MAX), isize::MIN))
+    }
+
+    fn do_move(&mut self, mv: BoardPos) {
+        // Update tile.
+        match self.board[mv] {
+            Cell::Empty => self.board[mv] = Cell::Unit(self.player),
+            Cell::Unit(_) => self.board[mv] = Cell::Wall(self.player),
+            Cell::Wall(_) => unreachable!(),
+        }
+
+        // Update turns left and the player.
+        if self.turns_left == 1 {
+            self.turns_left = 3;
+            self.player = -self.player;
         } else {
-            false
+            self.turns_left -= 1;
         }
     }
 
-    /// Should be called whenever a cell is placed to update legal moves.
-    /// Returns whether the next player has legal moves left.
-    fn update_legal(&mut self, y: usize, x: usize) -> bool {
-        todo!()
+    fn undo_move(&mut self, mv: BoardPos) {
+        // Inverse of above.
+        if self.turns_left == 3 {
+            self.turns_left = 1;
+            self.player = -self.player;
+        } else {
+            self.turns_left += 1;
+        }
+
+        match self.board[mv] {
+            Cell::Empty => unreachable!(),
+            Cell::Unit(_) => self.board[mv] = Cell::Empty,
+            Cell::Wall(_) => self.board[mv] = Cell::Unit(-self.player),
+        }
     }
 }
 
 fn main() {
-    let game = Game::default();
+    let mut game = Game::default();
     println!("{game}");
+
+    let (pos, eval) = game.recurse(9);
+    println!("Evaluation: {} / #{}", pos, eval);
 }
